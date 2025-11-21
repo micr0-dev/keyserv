@@ -1,0 +1,28 @@
+[irc]
+server = "irc.micr0.dev"
+port = 6697
+ssl = true
+nick = "KeyServ"
+realname = "SSH Key Authentication Service"
+channels = ["#micr0"]
+
+# IRC Operator credentials for SANICK command
+oper_name = "KeyServ"
+oper_pass = "[PASSWORD_HERE]"
+
+[bot]
+# How long challenges are valid (seconds)
+challenge_timeout = 300
+
+# How long users have to authenticate after joining (seconds)
+auth_timeout = 60
+
+# Database file path
+database = "keyserv.json"
+
+# Namespace for ssh-keygen signing
+sign_namespace = "irc"
+
+# Enforce authentication (rename users who don't auth)
+# Requires oper privileges for SANICK
+enforce_auth = true
