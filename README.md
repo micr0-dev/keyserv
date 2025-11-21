@@ -23,3 +23,11 @@ Because everyone has them. And passwords are annoying.
 - `info <nick>` - Check if a nickname is registered
 - `version` - Show bot version
 - `help` - Show the help message
+
+## Support / Community
+
+Questions? Want to chat? Join us at [chat.micr0.dev](https://chat.micr0.dev)
+
+Channels: #dev for project discussion, #help for support
+
+IRC: irc.micr0.dev (ports 6667/6697)
