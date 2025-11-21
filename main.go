@@ -17,7 +17,7 @@ import (
 	irc "github.com/thoj/go-ircevent"
 )
 
-const VERSION = "1.0.0"
+const VERSION = "1.0.1"
 
 // Config structures
 type Config struct {
@@ -527,7 +527,18 @@ func (ks *KeyServ) handleVerify(nick, signature string) {
 
 			// Mark session as authenticated
 			session := ks.getSession(nick)
-			if session != nil {
+			if session == nil {
+				// Create session if user authenticated without joining
+				session = &Session{
+					Nick:          nick,
+					Hostmask:      "unknown",
+					Authenticated: true,
+					JoinTime:      time.Now(),
+					WarningGiven:  false,
+					KickScheduled: false,
+				}
+				ks.sessions["auth:"+nick] = session
+			} else {
 				session.Authenticated = true
 			}
 
@@ -555,7 +566,18 @@ func (ks *KeyServ) handleVerify(nick, signature string) {
 
 			// Mark session as authenticated
 			session := ks.getSession(nick)
-			if session != nil {
+			if session == nil {
+				// Create session if user authenticated without joining
+				session = &Session{
+					Nick:          nick,
+					Hostmask:      "unknown",
+					Authenticated: true,
+					JoinTime:      time.Now(),
+					WarningGiven:  false,
+					KickScheduled: false,
+				}
+				ks.sessions["auth:"+nick] = session
+			} else {
 				session.Authenticated = true
 			}
 
