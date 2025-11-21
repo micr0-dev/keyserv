@@ -17,7 +17,7 @@ import (
 	irc "github.com/thoj/go-ircevent"
 )
 
-const VERSION = "1.0.1"
+const VERSION = "1.0.2"
 
 // Config structures
 type Config struct {
@@ -69,6 +69,7 @@ type Session struct {
 	JoinTime      time.Time
 	WarningGiven  bool
 	KickScheduled bool
+	GracePeriod   bool // Don't enforce immediately on bot restart
 }
 
 // Challenge structure
@@ -88,13 +89,14 @@ type SignatureBuffer struct {
 
 // Bot state
 type KeyServ struct {
-	config     Config
-	db         *Database
-	ircConn    *irc.Connection
-	challenges map[string]*Challenge
-	sigBuffers map[string]*SignatureBuffer
-	sessions   map[string]*Session
-	isOper     bool
+	config          Config
+	db              *Database
+	ircConn         *irc.Connection
+	challenges      map[string]*Challenge
+	sigBuffers      map[string]*SignatureBuffer
+	sessions        map[string]*Session
+	isOper          bool
+	startupComplete bool
 }
 
 func main() {
@@ -106,11 +108,12 @@ func main() {
 	}
 
 	bot := &KeyServ{
-		config:     config,
-		challenges: make(map[string]*Challenge),
-		sigBuffers: make(map[string]*SignatureBuffer),
-		sessions:   make(map[string]*Session),
-		isOper:     false,
+		config:          config,
+		challenges:      make(map[string]*Challenge),
+		sigBuffers:      make(map[string]*SignatureBuffer),
+		sessions:        make(map[string]*Session),
+		isOper:          false,
+		startupComplete: false,
 	}
 
 	bot.loadDatabase()
@@ -160,6 +163,7 @@ func (ks *KeyServ) setupIRC() {
 				ks.ircConn.Join(channel)
 				log.Printf("✓ Joined %s", channel)
 			}
+			ks.discoverExistingUsers()
 		}
 	})
 
@@ -173,6 +177,9 @@ func (ks *KeyServ) setupIRC() {
 			ks.ircConn.Join(channel)
 			log.Printf("✓ Joined %s", channel)
 		}
+
+		// Discover users already in channel
+		ks.discoverExistingUsers()
 	})
 
 	// Handle oper authentication failure
@@ -184,6 +191,48 @@ func (ks *KeyServ) setupIRC() {
 		for _, channel := range ks.config.IRC.Channels {
 			ks.ircConn.Join(channel)
 			log.Printf("✓ Joined %s", channel)
+		}
+		ks.discoverExistingUsers()
+	})
+
+	// Handle WHO replies for discovering existing users
+	ks.ircConn.AddCallback("352", func(e *irc.Event) {
+		// WHO reply: 352 <requester> <channel> <user> <host> <server> <nick> <flags> :<hopcount> <realname>
+		if len(e.Arguments) >= 6 {
+			nick := e.Arguments[5]
+			user := e.Arguments[2]
+			host := e.Arguments[3]
+			hostmask := user + "@" + host
+
+			// Ignore our own nick
+			if nick == ks.config.IRC.Nick {
+				return
+			}
+
+			// Check if nick is registered
+			if _, exists := ks.db.Users[nick]; exists {
+				// Create session with grace period
+				if _, sessionExists := ks.sessions[hostmask]; !sessionExists {
+					ks.sessions[hostmask] = &Session{
+						Nick:          nick,
+						Hostmask:      hostmask,
+						Authenticated: false,
+						JoinTime:      time.Now(),
+						WarningGiven:  false,
+						KickScheduled: false,
+						GracePeriod:   true, // Don't enforce immediately
+					}
+					log.Printf("Discovered registered user %s already in channel (grace period enabled)", nick)
+				}
+			}
+		}
+	})
+
+	// Handle end of WHO list
+	ks.ircConn.AddCallback("315", func(e *irc.Event) {
+		if !ks.startupComplete {
+			ks.startupComplete = true
+			log.Println("✓ Startup complete, discovered all existing users")
 		}
 	})
 
@@ -199,7 +248,7 @@ func (ks *KeyServ) setupIRC() {
 
 		// Check if nick is registered
 		if user, exists := ks.db.Users[nick]; exists {
-			// Create session
+			// Create session (no grace period for new joins)
 			ks.sessions[hostmask] = &Session{
 				Nick:          nick,
 				Hostmask:      hostmask,
@@ -207,6 +256,7 @@ func (ks *KeyServ) setupIRC() {
 				JoinTime:      time.Now(),
 				WarningGiven:  false,
 				KickScheduled: false,
+				GracePeriod:   false,
 			}
 
 			// Send auth reminder
@@ -236,8 +286,25 @@ func (ks *KeyServ) setupIRC() {
 		hostmask := e.User + "@" + e.Host
 
 		if session, exists := ks.sessions[hostmask]; exists {
-			session.Nick = newNick
 			log.Printf("Nick change: %s -> %s", oldNick, newNick)
+
+			// Check if the NEW nick is registered
+			if _, newNickRegistered := ks.db.Users[newNick]; newNickRegistered {
+				// Update session for the new registered nick
+				session.Nick = newNick
+				session.JoinTime = time.Now()
+				session.Authenticated = false
+				session.WarningGiven = false
+				session.KickScheduled = false
+				session.GracePeriod = false
+
+				// Send auth reminder
+				ks.reply(newNick, fmt.Sprintf("This nickname is registered. Please authenticate within %d seconds: type 'auth'", ks.config.Bot.AuthTimeout))
+			} else {
+				// New nick is NOT registered - delete the session entirely
+				delete(ks.sessions, hostmask)
+				log.Printf("Nick %s is not registered, session removed", newNick)
+			}
 		}
 	})
 
@@ -251,6 +318,18 @@ func (ks *KeyServ) setupIRC() {
 	})
 }
 
+// Discover users already in channels on startup
+func (ks *KeyServ) discoverExistingUsers() {
+	// Wait a bit for channels to fully join
+	time.Sleep(3 * time.Second)
+
+	// Send WHO for each channel to discover existing users
+	for _, channel := range ks.config.IRC.Channels {
+		ks.ircConn.SendRaw(fmt.Sprintf("WHO %s", channel))
+		log.Printf("Discovering users in %s", channel)
+	}
+}
+
 func (ks *KeyServ) monitorSessions() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -260,6 +339,18 @@ func (ks *KeyServ) monitorSessions() {
 
 		for hostmask, session := range ks.sessions {
 			if session.Authenticated {
+				continue
+			}
+
+			// Skip grace period users initially
+			if session.GracePeriod {
+				// After 30 seconds, remove grace period
+				if time.Since(session.JoinTime).Seconds() > 30 {
+					session.GracePeriod = false
+					// Reset join time so they get the full auth timeout
+					session.JoinTime = now
+					ks.reply(session.Nick, fmt.Sprintf("Please authenticate within %d seconds: type 'auth'", ks.config.Bot.AuthTimeout))
+				}
 				continue
 			}
 
@@ -280,8 +371,9 @@ func (ks *KeyServ) monitorSessions() {
 					// Force nick change using SANICK
 					newNick := session.Nick + "_"
 					ks.ircConn.SendRaw(fmt.Sprintf("SANICK %s %s", session.Nick, newNick))
-					ks.reply(session.Nick, "Authentication timeout. Your nickname has been changed.")
-					ks.reply(newNick, "To reclaim your nickname, authenticate with 'auth'")
+					ks.reply(newNick, "Authentication timeout. Your nickname has been changed.")
+					ks.reply(newNick, fmt.Sprintf("To reclaim '%s', change back with: /nick %s", session.Nick, session.Nick))
+					ks.reply(newNick, "Then authenticate with 'auth'")
 
 					// Announce to channels
 					for _, channel := range ks.config.IRC.Channels {
@@ -290,11 +382,8 @@ func (ks *KeyServ) monitorSessions() {
 
 					log.Printf("Forced nick change: %s -> %s (auth timeout)", session.Nick, newNick)
 
-					// Update session
-					session.Nick = newNick
-					session.JoinTime = now
-					session.WarningGiven = false
-					session.KickScheduled = false
+					// Delete the session - it will be recreated if they change to a registered nick
+					delete(ks.sessions, hostmask)
 				} else {
 					// Just warn without enforcement
 					ks.reply(session.Nick, "⚠⚠⚠ AUTHENTICATION TIMEOUT ⚠⚠⚠")
@@ -536,6 +625,7 @@ func (ks *KeyServ) handleVerify(nick, signature string) {
 					JoinTime:      time.Now(),
 					WarningGiven:  false,
 					KickScheduled: false,
+					GracePeriod:   false,
 				}
 				ks.sessions["auth:"+nick] = session
 			} else {
@@ -575,6 +665,7 @@ func (ks *KeyServ) handleVerify(nick, signature string) {
 					JoinTime:      time.Now(),
 					WarningGiven:  false,
 					KickScheduled: false,
+					GracePeriod:   false,
 				}
 				ks.sessions["auth:"+nick] = session
 			} else {
